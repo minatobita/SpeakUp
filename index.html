@@ -36,7 +36,6 @@
       margin-bottom: 12px;
     }
 
-    /* START BUTTON */
     .start-btn {
       width: 100%;
       height: 80px;
@@ -57,7 +56,6 @@
     }
     .start-btn:active { transform: scale(0.97); }
 
-    /* RECORDING UI */
     #uiRec { display: none; flex-direction: column; gap: 10px; }
 
     .rec-status {
@@ -89,7 +87,6 @@
       margin-left: 4px;
     }
 
-    /* TAKE TRANSCRIPT BUTTON – PRIMARY */
     .take-btn {
       width: 100%;
       height: 86px;
@@ -120,7 +117,6 @@
       animation: none;
     }
 
-    /* STOP BUTTON – SECONDARY */
     .stop-btn {
       width: 100%;
       height: 50px;
@@ -141,7 +137,6 @@
     }
     .stop-btn:active { transform: scale(0.96); background: rgba(233,69,96,0.22); }
 
-    /* LOCK SCREEN TIP */
     .lock-tip {
       margin-top: 2px;
       background: rgba(99,102,241,0.08);
@@ -155,7 +150,6 @@
     }
     .lock-tip strong { color: #818cf8; }
 
-    /* LIVE BOX */
     .live-section {
       padding: 12px 16px 0;
       display: none;
@@ -185,7 +179,6 @@
       font-style: normal;
     }
 
-    /* ALERT */
     .alert {
       margin: 10px 16px 0;
       background: rgba(233,69,96,0.1);
@@ -198,7 +191,6 @@
       display: none;
     }
 
-    /* TRANSCRIPTS */
     .transcripts-section {
       flex: 1;
       padding: 14px 16px 80px;
@@ -237,7 +229,6 @@
       line-height: 2.5;
     }
 
-    /* CARD */
     .card {
       background: rgba(255,255,255,0.06);
       border-radius: 14px;
@@ -277,18 +268,15 @@
 </head>
 <body>
 
-  <!-- TOP BAR -->
   <div class="top-bar">
     <p class="app-title">🎙️ SpeakUp</p>
 
-    <!-- IDLE -->
     <div id="uiIdle">
       <button class="start-btn" onclick="startRecording()">
         <span>▶</span><span>Start Recording</span>
       </button>
     </div>
 
-    <!-- RECORDING -->
     <div id="uiRec">
       <div class="rec-status">
         <div class="rec-dot"></div>
@@ -296,329 +284,297 @@
         <span class="bg-badge">● BG Active</span>
       </div>
 
-      <!-- PRIMARY: Take Transcript -->
       <button class="take-btn" id="takeBtn" onclick="takeTranscript()">
         📋&nbsp;&nbsp;TAKE TRANSCRIPT
       </button>
 
-      <!-- SECONDARY: Stop -->
       <button class="stop-btn" onclick="stopRecording()">
         ⏹&nbsp;&nbsp;STOP
       </button>
 
       <div class="lock-tip">
-        🔒 Lock screen: press <strong>⏭ Next</strong> in media controls<br>
-        🎧 Earphones: <strong>double-press</strong> center button
+        <strong>Lock screen:</strong> tap <strong>⏭ Next</strong> in media controls = Take Transcript
       </div>
     </div>
   </div>
 
-  <!-- LIVE BOX -->
   <div class="live-section" id="liveSection">
-    <div class="live-label">🟢 Live · last 5 seconds</div>
-    <div class="live-box" id="liveBox">🎤 Listening…</div>
+    <p class="live-label">⬤ Live · last 5 seconds</p>
+    <div class="live-box" id="liveBox">Listening…</div>
   </div>
 
-  <!-- ALERT -->
   <div class="alert" id="alertBox"></div>
 
-  <!-- TRANSCRIPTS -->
   <div class="transcripts-section">
     <div class="tx-header">
       <span class="tx-title">Transcripts</span>
-      <button class="clear-btn" id="clearBtn" onclick="clearCards()">Clear All</button>
+      <button class="clear-btn" id="clearBtn" onclick="clearAll()">Clear All</button>
     </div>
-    <div id="transcriptList">
-      <p class="empty-msg" id="emptyMsg">📭 No transcripts yet<br>Press Start → speak → Take Transcript</p>
+    <div id="cardList">
+      <p class="empty-msg">Press Start Recording<br>then tap 📋 Take Transcript</p>
     </div>
   </div>
 
 <script>
-// ============================================================
-//  WORD LOG — single source of truth
-//  Every confirmed word gets a timestamp estimated from its
-//  position inside the phrase.  currentInterim holds words
-//  that iOS hasn't confirmed yet (still being processed).
-// ============================================================
-let wordLog       = [];   // [{word, t}]  t = ms epoch
-let currentInterim = '';  // unconfirmed fragment from iOS
-let phraseStart   = 0;    // when current recognition session began
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let isRecording   = false;
+let recognition   = null;
+let elapsedSec    = 0;
+let clockInterval = null;
+let liveInterval  = null;
+let audioCtx      = null;
+let silentNode    = null;
 
-/** Spread words across [phraseStart … now] and push to wordLog */
-function commitFinalPhrase(text) {
-  const now   = Date.now();
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (!words.length) return;
-  const dur   = Math.max(now - phraseStart, 100);
-  words.forEach((w, i) => {
-    wordLog.push({ word: w, t: phraseStart + dur * (i + 1) / words.length });
-  });
-  phraseStart = now;   // next phrase starts from here
-}
+// *** THE ONLY DATA SOURCE ***
+// Each entry: { text: string, time: number (Date.now() when finalized) }
+let wordLog = [];
 
-/** THE only function used by both liveBox and Take Transcript */
+// Interim text from the current in-flight recognition session
+let interimText = '';
+let interimTime = 0;  // when interim was last updated
+
+// ─── 5-SECOND WINDOW ──────────────────────────────────────────────────────────
 function getLast5s() {
   const cutoff = Date.now() - 5000;
-  const finals = wordLog.filter(w => w.t >= cutoff).map(w => w.word).join(' ');
-  const interim = currentInterim.trim();
-  if (interim) return (finals + ' ' + interim).trim();
-  return finals;
-}
 
-function purgeOldWords() {
-  const cutoff = Date.now() - 30000;
-  wordLog = wordLog.filter(w => w.t >= cutoff);
-}
+  // *** PURGE old entries every time this is called ***
+  wordLog = wordLog.filter(e => e.time >= cutoff);
 
-// ============================================================
-//  RECOGNITION LOOP
-// ============================================================
-let recognition    = null;
-let isRecording    = false;
-let keepGoing      = false;
+  // Collect finalized words
+  const parts = wordLog.map(e => e.text);
 
-function buildRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    showAlert('⚠️ Speech recognition not supported. Please use Safari on iPhone.');
-    return null;
+  // Also include current interim if it's fresh enough
+  if (interimText && interimTime >= cutoff) {
+    parts.push(interimText);
   }
-  const r          = new SR();
-  r.lang           = 'en-US';
-  r.continuous     = false;   // iOS ignores true; we loop manually
-  r.interimResults = true;
-  r.maxAlternatives = 1;
 
-  r.onstart = () => { phraseStart = Date.now(); };
-
-  r.onresult = (e) => {
-    let interim = '';
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) {
-        commitFinalPhrase(t);
-        currentInterim = '';
-      } else {
-        interim += t;
-      }
-    }
-    currentInterim = interim;
-    renderLive();
-  };
-
-  r.onerror = (e) => {
-    if (['no-speech', 'aborted'].includes(e.error)) return;
-    console.warn('SR error:', e.error);
-  };
-
-  r.onend = () => {
-    // Don't clear interim here — keep showing it until next result
-    if (keepGoing && isRecording) {
-      setTimeout(() => {
-        if (!keepGoing || !isRecording) return;
-        recognition = buildRecognition();
-        if (recognition) { try { recognition.start(); } catch(e) {} }
-      }, 80);
-    }
-  };
-
-  return r;
+  return parts.join(' ').trim();
 }
 
-// ============================================================
-//  LIVE BOX  (updates every 150 ms for snappy 5-second trim)
-// ============================================================
-let liveTimer = null;
-
-function renderLive() {
+// ─── LIVE BOX UPDATE (runs every 100ms) ───────────────────────────────────────
+function updateLive() {
   const text = getLast5s();
   const box  = document.getElementById('liveBox');
   if (text) {
     box.textContent = text;
     box.classList.add('has-text');
   } else {
-    box.textContent = '🎤 Listening…';
+    box.textContent = 'Listening…';
     box.classList.remove('has-text');
   }
 }
 
-function startLiveTimer() {
-  liveTimer = setInterval(() => { renderLive(); purgeOldWords(); }, 150);
-}
-function stopLiveTimer() { clearInterval(liveTimer); liveTimer = null; }
+// ─── START RECORDING ──────────────────────────────────────────────────────────
+function startRecording() {
+  if (isRecording) return;
 
-// ============================================================
-//  TIMER
-// ============================================================
-let timerSec = 0, timerHandle = null;
-
-function startTimer() {
-  timerSec = 0;
-  clearInterval(timerHandle);
-  timerHandle = setInterval(() => {
-    timerSec++;
-    const h = String(Math.floor(timerSec / 3600)).padStart(2, '0');
-    const m = String(Math.floor((timerSec % 3600) / 60)).padStart(2, '0');
-    const s = String(timerSec % 60).padStart(2, '0');
-    document.getElementById('recTime').textContent = `${h}:${m}:${s}`;
-  }, 1000);
-}
-function stopTimer() { clearInterval(timerHandle); }
-
-// ============================================================
-//  BACKGROUND AUDIO  (keeps Safari alive when screen locks)
-// ============================================================
-let audioCtx = null;
-
-function startBgAudio() {
-  try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const buf    = audioCtx.createBuffer(1, audioCtx.sampleRate, audioCtx.sampleRate);
-    const src    = audioCtx.createBufferSource();
-    src.buffer   = buf;
-    src.loop     = true;
-    src.connect(audioCtx.destination);
-    src.start();
-  } catch(e) { console.warn('BG audio failed', e); }
-}
-function stopBgAudio() {
-  try { audioCtx && audioCtx.close(); } catch(e) {}
-  audioCtx = null;
-}
-
-// ============================================================
-//  MEDIA SESSION  (lock-screen ⏭ button → Take Transcript)
-// ============================================================
-function setupMediaSession() {
-  if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: 'SpeakUp 🎤',
-    artist: 'Tap ⏭ to Take Transcript',
-    album: 'English Learning'
-  });
-  navigator.mediaSession.setActionHandler('nexttrack', takeTranscript);
-  navigator.mediaSession.setActionHandler('previoustrack', takeTranscript);
-}
-
-// ============================================================
-//  MIC UNLOCK
-// ============================================================
-async function unlockMic() {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(t => t.stop());
-    return true;
-  } catch(e) {
-    showAlert('⚠️ Microphone denied. Go to iPhone Settings → Safari → Microphone → Allow.');
-    return false;
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    showAlert('⚠️ Please open this app in Safari on iPhone.');
+    return;
   }
+
+  // Unlock mic first via getUserMedia
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .then(() => {
+      isRecording = true;
+      wordLog      = [];
+      interimText  = '';
+      interimTime  = 0;
+      elapsedSec   = 0;
+
+      document.getElementById('uiIdle').style.display   = 'none';
+      document.getElementById('uiRec').style.display    = 'flex';
+      document.getElementById('liveSection').style.display = 'block';
+      document.getElementById('alertBox').style.display = 'none';
+
+      startClock();
+      startSilentAudio();
+      setupMediaSession();
+      launchRecognition();
+
+      // Update live box every 100ms
+      liveInterval = setInterval(updateLive, 100);
+    })
+    .catch(() => {
+      showAlert('⚠️ Microphone permission denied. Go to Settings → Safari → Microphone and allow access.');
+    });
 }
 
-// ============================================================
-//  MAIN ACTIONS
-// ============================================================
-async function startRecording() {
-  const ok = await unlockMic();
-  if (!ok) return;
+// ─── RECOGNITION LOOP ─────────────────────────────────────────────────────────
+function launchRecognition() {
+  if (!isRecording) return;
 
-  // Reset data
-  wordLog        = [];
-  currentInterim = '';
-  phraseStart    = Date.now();
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang              = 'en-US';
+  recognition.continuous        = false;   // iOS requires false
+  recognition.interimResults    = true;
+  recognition.maxAlternatives   = 1;
 
-  isRecording = true;
-  keepGoing   = true;
+  recognition.onresult = (event) => {
+    let finalText   = '';
+    let currentInterim = '';
 
-  startBgAudio();
-  setupMediaSession();
-  startTimer();
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const res = event.results[i];
+      if (res.isFinal) {
+        finalText += res[0].transcript.trim() + ' ';
+      } else {
+        currentInterim += res[0].transcript.trim() + ' ';
+      }
+    }
 
-  recognition = buildRecognition();
-  if (recognition) { try { recognition.start(); } catch(e) {} }
+    // Finalized speech → push to wordLog with current timestamp
+    if (finalText.trim()) {
+      wordLog.push({ text: finalText.trim(), time: Date.now() });
+      interimText = '';
+      interimTime = 0;
+    }
 
-  document.getElementById('uiIdle').style.display   = 'none';
-  document.getElementById('uiRec').style.display     = 'flex';
-  document.getElementById('liveSection').style.display = 'block';
-  hideAlert();
-  startLiveTimer();
+    // Interim → store separately with timestamp
+    if (currentInterim.trim()) {
+      interimText = currentInterim.trim();
+      interimTime = Date.now();
+    }
+  };
+
+  recognition.onerror = (e) => {
+    if (e.error === 'not-allowed') {
+      showAlert('⚠️ Microphone blocked. Please allow microphone access in Safari settings.');
+      stopRecording();
+    }
+    // All other errors: just restart
+  };
+
+  recognition.onend = () => {
+    // Any interim that was in-flight becomes finalized now
+    if (interimText.trim()) {
+      wordLog.push({ text: interimText.trim(), time: interimTime || Date.now() });
+      interimText = '';
+      interimTime = 0;
+    }
+    // Restart immediately to keep continuous loop
+    if (isRecording) {
+      setTimeout(launchRecognition, 80);
+    }
+  };
+
+  try { recognition.start(); } catch(e) {}
 }
 
-function stopRecording() {
-  isRecording = false;
-  keepGoing   = false;
-
-  try { recognition && recognition.abort(); } catch(e) {}
-  recognition    = null;
-  currentInterim = '';
-
-  stopTimer();
-  stopLiveTimer();
-  stopBgAudio();
-
-  document.getElementById('uiRec').style.display      = 'none';
-  document.getElementById('uiIdle').style.display     = 'block';
-  document.getElementById('liveSection').style.display = 'none';
-  const box = document.getElementById('liveBox');
-  box.textContent = '🎤 Listening…';
-  box.classList.remove('has-text');
-}
-
+// ─── TAKE TRANSCRIPT ──────────────────────────────────────────────────────────
 function takeTranscript() {
-  // Capture the EXACT same text the liveBox is showing right now
   const text = getLast5s();
 
-  // Flash button green as confirmation
+  const now  = new Date();
+  const ts   = now.toTimeString().slice(0, 8);
+
+  addCard(text || '', ts);
+
+  // Flash button green
   const btn = document.getElementById('takeBtn');
   btn.classList.add('flash');
   setTimeout(() => btn.classList.remove('flash'), 600);
-
-  addCard(text);
 }
 
-// ============================================================
-//  CARDS
-// ============================================================
-let cardCount = 0;
+// ─── ADD CARD ─────────────────────────────────────────────────────────────────
+function addCard(text, timestamp) {
+  const list = document.getElementById('cardList');
+  const empty = list.querySelector('.empty-msg');
+  if (empty) empty.remove();
 
-function addCard(text) {
-  cardCount++;
-  const emptyMsg = document.getElementById('emptyMsg');
-  if (emptyMsg) emptyMsg.remove();
   document.getElementById('clearBtn').style.display = 'block';
 
-  const time = new Date().toTimeString().slice(0, 8);
   const card = document.createElement('div');
   card.className = 'card';
-  const hasText = text && text.trim().length > 0;
+
+  const noSpeech = !text;
   card.innerHTML = `
     <div class="card-head">
-      <span class="card-time">${time}</span>
-      <span class="card-badge">#${cardCount}</span>
+      <span class="card-time">${timestamp}</span>
+      <span class="card-badge">last 5s</span>
     </div>
-    <div class="card-body${hasText ? '' : ' no-speech'}">
-      ${hasText ? text : '(No speech in last 5 seconds)'}
+    <div class="card-body ${noSpeech ? 'no-speech' : ''}">
+      ${noSpeech ? '(no speech detected in the last 5 seconds)' : escHtml(text)}
     </div>`;
-  const list = document.getElementById('transcriptList');
+
   list.insertBefore(card, list.firstChild);
 }
 
-function clearCards() {
-  cardCount = 0;
-  document.getElementById('transcriptList').innerHTML =
-    '<p class="empty-msg" id="emptyMsg">📭 No transcripts yet<br>Press Start → speak → Take Transcript</p>';
+// ─── STOP RECORDING ───────────────────────────────────────────────────────────
+function stopRecording() {
+  isRecording = false;
+
+  if (recognition) { try { recognition.stop(); } catch(e) {} recognition = null; }
+  if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+  if (liveInterval)  { clearInterval(liveInterval);  liveInterval  = null; }
+  if (silentNode)    { silentNode.stop(); silentNode = null; }
+  if (audioCtx)      { audioCtx.close(); audioCtx = null; }
+
+  wordLog     = [];
+  interimText = '';
+
+  document.getElementById('uiIdle').style.display      = '';
+  document.getElementById('uiRec').style.display       = 'none';
+  document.getElementById('liveSection').style.display = 'none';
+  document.getElementById('liveBox').textContent       = 'Listening…';
+  document.getElementById('liveBox').classList.remove('has-text');
+  document.getElementById('recTime').textContent       = '00:00:00';
+}
+
+// ─── CLOCK ────────────────────────────────────────────────────────────────────
+function startClock() {
+  clockInterval = setInterval(() => {
+    elapsedSec++;
+    const h = String(Math.floor(elapsedSec / 3600)).padStart(2,'0');
+    const m = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2,'0');
+    const s = String(elapsedSec % 60).padStart(2,'0');
+    document.getElementById('recTime').textContent = `${h}:${m}:${s}`;
+  }, 1000);
+}
+
+// ─── SILENT AUDIO (keeps iOS alive in background) ─────────────────────────────
+function startSilentAudio() {
+  try {
+    audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+    const buf  = audioCtx.createBuffer(1, audioCtx.sampleRate * 3, audioCtx.sampleRate);
+    silentNode = audioCtx.createBufferSource();
+    silentNode.buffer = buf;
+    silentNode.loop   = true;
+    silentNode.connect(audioCtx.destination);
+    silentNode.start();
+  } catch(e) {}
+}
+
+// ─── MEDIA SESSION (lock screen ⏭ = Take Transcript) ─────────────────────────
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  'SpeakUp 🎤',
+    artist: 'Tap ⏭ to Take Transcript',
+    album:  'Recording in progress'
+  });
+  navigator.mediaSession.setActionHandler('nexttrack', () => takeTranscript());
+  navigator.mediaSession.setActionHandler('play',  () => {});
+  navigator.mediaSession.setActionHandler('pause', () => {});
+}
+
+// ─── CLEAR ALL ────────────────────────────────────────────────────────────────
+function clearAll() {
+  document.getElementById('cardList').innerHTML =
+    '<p class="empty-msg">Press Start Recording<br>then tap 📋 Take Transcript</p>';
   document.getElementById('clearBtn').style.display = 'none';
 }
 
-// ============================================================
-//  ALERT
-// ============================================================
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function showAlert(msg) {
   const el = document.getElementById('alertBox');
   el.textContent = msg;
   el.style.display = 'block';
 }
-function hideAlert() {
-  document.getElementById('alertBox').style.display = 'none';
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 </script>
 </body>
