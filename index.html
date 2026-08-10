@@ -308,327 +308,339 @@
 
   <div class="alert" id="alertBox"></div>
 
-  <div class="transcripts-section">
+  <div class="transcripts-section" id="txSection">
     <div class="tx-header">
       <span class="tx-title">📝 Transcripts</span>
-      <button class="clear-btn" id="clearBtn" onclick="clearAll()">Clear All</button>
+      <button class="clear-btn" id="clearBtn" onclick="clearCards()">Clear</button>
     </div>
-    <div id="cardList">
-      <p class="empty-msg">Press ▶ Start Recording<br>then 📋 Take Transcript<br>to save what you said</p>
-    </div>
+    <p class="empty-msg" id="emptyMsg">
+      Press ▶ Start Recording<br>
+      then 📋 Take Transcript<br>
+      to capture what you said
+    </p>
   </div>
 
-<script>
-// ═══════════════════════════════════════════════════
-//  NEW ARCHITECTURE: 5-second session chunks
-//  Each recognition session runs for max 5 seconds,
-//  then restarts. Each chunk is stored with timestamps.
-//  No word-level timestamping → no drift, no duplication.
-// ═══════════════════════════════════════════════════
+  <script>
+  // ═══════════════════════════════════════════════
+  //  SINGLE SOURCE OF TRUTH
+  //  entries[] = [{text, time}]  ← FINAL results only
+  //  interimText, interimTime    ← current partial
+  // ═══════════════════════════════════════════════
 
-const SESSION_MS = 4800;  // force restart every ~5 seconds
-const BUFFER_MS  = 12000; // keep last 12 seconds of chunks
-const WAIT_MS    = 1500;  // wait after Take Transcript for late speech
+  let entries      = [];   // final results with timestamps
+  let interimText  = '';
+  let interimTime  = 0;
 
-let isRecording    = false;
-let chunks         = [];   // [{text, startTime, endTime}]
-let currentInterim = '';
-let currentSessionStart = 0;
-let recognition    = null;
-let sessionTimer   = null;
-let liveTimer      = null;
-let elapsedTimer   = null;
-let elapsedSecs    = 0;
-let mediaStream    = null;
-let silentCtx      = null;
-let isTaking       = false; // prevent double-tap
+  let isRecording  = false;
+  let recognition  = null;
+  let isTaking     = false;
 
-// ─── Silent audio: keep iOS alive in background ───
-function startSilentAudio() {
-  try {
-    silentCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = silentCtx.createBuffer(1, silentCtx.sampleRate * 3, silentCtx.sampleRate);
-    function loop() {
-      if (!isRecording) return;
-      const src = silentCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(silentCtx.destination);
-      src.onended = loop;
-      src.start();
-    }
-    loop();
-  } catch(e) { console.log('Silent audio failed:', e); }
-}
+  let recTimerID   = null;
+  let liveTimerID  = null;
+  let purgeTimerID = null;
+  let recStart     = null;
 
-// ─── Lock screen media session ─────────────────────
-function setupMediaSession() {
-  if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: 'SpeakUp 🎤',
-    artist: 'Recording in progress…',
-    album: 'Tap ⏭ to Take Transcript'
-  });
-  navigator.mediaSession.setActionHandler('nexttrack', () => takeTranscript());
-  navigator.mediaSession.setActionHandler('previoustrack', () => takeTranscript());
-}
+  // ─── getLast5s ─────────────────────────────────
+  // THE ONLY function that reads entries.
+  // Returns text spoken between (refTime - 5000) and refTime.
+  function getLast5s(refTime) {
+    const cutoff = refTime - 5000;
+    const parts = [];
 
-// ─── Time format ───────────────────────────────────
-function formatTime(s) {
-  const h = String(Math.floor(s / 3600)).padStart(2, '0');
-  const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
-  return `${h}:${m}:${ss}`;
-}
-
-// ─── Show alert ────────────────────────────────────
-function showAlert(msg) {
-  const el = document.getElementById('alertBox');
-  el.textContent = msg;
-  el.style.display = 'block';
-  setTimeout(() => el.style.display = 'none', 5000);
-}
-
-// ═══════════════════════════════════════════════════
-//  START RECORDING
-// ═══════════════════════════════════════════════════
-async function startRec() {
-  // 1. Get mic permission first
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch(e) {
-    showAlert('⚠️ Microphone permission denied. Please allow access in Safari Settings.');
-    return;
-  }
-
-  isRecording    = true;
-  chunks         = [];
-  currentInterim = '';
-  elapsedSecs    = 0;
-  isTaking       = false;
-
-  document.getElementById('uiIdle').style.display  = 'none';
-  document.getElementById('uiRec').style.display   = 'flex';
-  document.getElementById('liveSection').style.display = 'block';
-
-  startSilentAudio();
-  setupMediaSession();
-
-  elapsedTimer = setInterval(() => {
-    elapsedSecs++;
-    document.getElementById('recTime').textContent = formatTime(elapsedSecs);
-  }, 1000);
-
-  // Update live box every 200ms
-  liveTimer = setInterval(updateLive, 200);
-
-  // Start first 5-second session
-  startSession();
-}
-
-// ═══════════════════════════════════════════════════
-//  5-SECOND SESSION
-//  Each session runs for SESSION_MS then auto-restarts.
-//  Result stored as one chunk with startTime / endTime.
-// ═══════════════════════════════════════════════════
-function startSession() {
-  if (!isRecording) return;
-
-  currentSessionStart = Date.now();
-  currentInterim      = '';
-
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) { showAlert('Speech recognition not supported. Use Safari on iPhone.'); return; }
-
-  recognition = new SR();
-  recognition.continuous      = false; // iOS requirement
-  recognition.interimResults  = true;
-  recognition.lang            = 'en-US';
-  recognition.maxAlternatives = 1;
-
-  let sessionFinal = '';
-
-  recognition.onresult = (e) => {
-    let interim = '';
-    let final   = '';
-    for (let i = 0; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        final += e.results[i][0].transcript + ' ';
-      } else {
-        interim += e.results[i][0].transcript;
+    for (const e of entries) {
+      if (e.time >= cutoff && e.time <= refTime) {
+        parts.push(e.text);
       }
     }
-    if (final.trim()) sessionFinal = final.trim();
-    currentInterim = interim;
-  };
 
-  recognition.onend = () => {
-    clearTimeout(sessionTimer);
-
-    // ── Store this session's result as one chunk ──
-    if (sessionFinal.trim()) {
-      chunks.push({
-        text:      sessionFinal.trim(),
-        startTime: currentSessionStart,
-        endTime:   Date.now()
-      });
+    // Add interim if it falls in the window
+    if (interimText && interimTime >= cutoff && interimTime <= refTime) {
+      parts.push(interimText);
     }
 
-    // ── Purge chunks older than BUFFER_MS ─────────
-    const purge = Date.now() - BUFFER_MS;
-    chunks = chunks.filter(c => c.endTime >= purge);
-
-    currentInterim = '';
-    sessionFinal   = '';
-
-    // ── Restart immediately ───────────────────────
-    if (isRecording) {
-      setTimeout(startSession, 100);
-    }
-  };
-
-  recognition.onerror = (e) => {
-    // 'no-speech' and 'aborted' are normal — onend will restart
-    if (e.error !== 'no-speech' && e.error !== 'aborted') {
-      console.log('SR error:', e.error);
-    }
-  };
-
-  try {
-    recognition.start();
-  } catch(e) {
-    console.log('recognition.start() error:', e);
-    if (isRecording) setTimeout(startSession, 500);
+    return parts.join(' ').trim();
   }
 
-  // Force-stop after SESSION_MS → triggers onend → restarts
-  sessionTimer = setTimeout(() => {
-    try { recognition.stop(); } catch(e) {}
-  }, SESSION_MS);
-}
+  // ─── purgeOld ──────────────────────────────────
+  // Keep only last 10 seconds in entries[] to prevent growth.
+  // Called every 500ms.
+  function purgeOld() {
+    const keep = Date.now() - 10000;
+    entries = entries.filter(e => e.time >= keep);
+  }
 
-// ═══════════════════════════════════════════════════
-//  LIVE BOX — shows last 5 seconds only
-// ═══════════════════════════════════════════════════
-function updateLive() {
-  const now    = Date.now();
-  const cutoff = now - 5000;
+  // ─── updateLive ────────────────────────────────
+  // Called every 100ms. Shows getLast5s(now) in the live box.
+  function updateLive() {
+    const text = getLast5s(Date.now());
+    const box  = document.getElementById('liveBox');
+    if (text) {
+      box.textContent = text;
+      box.classList.add('has-text');
+    } else {
+      box.textContent = 'Listening…';
+      box.classList.remove('has-text');
+    }
+  }
 
-  const text = chunks
-    .filter(c => c.endTime >= cutoff)
-    .map(c => c.text)
-    .join(' ')
-    .trim();
+  // ─── startRecognition ──────────────────────────
+  // Starts one recognition session. Restarts itself on end.
+  function startRecognition() {
+    if (!isRecording) return;
 
-  // Also show current session's interim (real-time)
-  const combined = [text, currentInterim].filter(Boolean).join(' ').trim();
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      showAlert('Speech Recognition is not supported in this browser. Please use Safari on iPhone.');
+      return;
+    }
 
-  const box = document.getElementById('liveBox');
-  if (combined) {
-    box.textContent = combined;
-    box.classList.add('has-text');
-  } else {
-    box.textContent = '🎤 Listening…';
+    recognition = new SR();
+    recognition.continuous      = false;  // iOS works best with false + auto-restart
+    recognition.interimResults  = true;
+    recognition.lang            = 'en-US';
+    recognition.maxAlternatives = 1;
+
+    // Track the last final text to prevent duplicates across restarts
+    let lastFinal = '';
+
+    recognition.onresult = function(e) {
+      let finalStr  = '';
+      let interimStr = '';
+
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript.trim();
+        if (e.results[i].isFinal) {
+          finalStr += (finalStr ? ' ' : '') + t;
+        } else {
+          interimStr += (interimStr ? ' ' : '') + t;
+        }
+      }
+
+      // Update interim
+      if (interimStr) {
+        interimText = interimStr;
+        interimTime = Date.now();
+      }
+
+      // Add final to entries (skip duplicates)
+      if (finalStr && finalStr !== lastFinal) {
+        lastFinal = finalStr;
+        entries.push({ text: finalStr, time: Date.now() });
+        interimText = '';
+        interimTime = 0;
+      }
+    };
+
+    recognition.onend = function() {
+      interimText = '';
+      interimTime = 0;
+      if (isRecording) {
+        setTimeout(startRecognition, 150);
+      }
+    };
+
+    recognition.onerror = function(e) {
+      interimText = '';
+      interimTime = 0;
+      // no-speech and network errors are normal – just restart
+    };
+
+    try {
+      recognition.start();
+    } catch(err) {
+      setTimeout(startRecognition, 300);
+    }
+  }
+
+  // ─── startRec ──────────────────────────────────
+  function startRec() {
+    if (isRecording) return;
+    hideAlert();
+
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function() {
+
+      isRecording  = true;
+      entries      = [];
+      interimText  = '';
+      interimTime  = 0;
+      recStart     = Date.now();
+
+      document.getElementById('uiIdle').style.display   = 'none';
+      document.getElementById('uiRec').style.display    = 'flex';
+      document.getElementById('liveSection').style.display = 'block';
+
+      // Start recognition loop
+      startRecognition();
+
+      // Recording timer (HH:MM:SS)
+      recTimerID = setInterval(function() {
+        const s   = Math.floor((Date.now() - recStart) / 1000);
+        const h   = String(Math.floor(s / 3600)).padStart(2, '0');
+        const m   = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+        const sec = String(s % 60).padStart(2, '0');
+        document.getElementById('recTime').textContent = h + ':' + m + ':' + sec;
+      }, 1000);
+
+      // Live box refresh
+      liveTimerID = setInterval(updateLive, 100);
+
+      // Purge old entries
+      purgeTimerID = setInterval(purgeOld, 500);
+
+      // Lock screen media controls
+      setupMediaSession();
+
+      // Silent audio to keep background alive
+      startSilentAudio();
+
+    }).catch(function() {
+      showAlert('⚠️ Microphone access denied. Go to iPhone Settings → Safari → Microphone → Allow.');
+    });
+  }
+
+  // ─── stopRec ───────────────────────────────────
+  function stopRec() {
+    isRecording = false;
+    if (recognition) { try { recognition.stop(); } catch(e) {} recognition = null; }
+    clearInterval(recTimerID);
+    clearInterval(liveTimerID);
+    clearInterval(purgeTimerID);
+
+    entries     = [];
+    interimText = '';
+    interimTime = 0;
+    isTaking    = false;
+
+    document.getElementById('uiIdle').style.display      = 'block';
+    document.getElementById('uiRec').style.display       = 'none';
+    document.getElementById('liveSection').style.display = 'none';
+
+    const box = document.getElementById('liveBox');
+    box.textContent = 'Listening…';
     box.classList.remove('has-text');
+
+    const btn = document.getElementById('takeBtn');
+    btn.className = 'take-btn';
+    btn.innerHTML = '📋&nbsp;&nbsp;TAKE TRANSCRIPT';
   }
-}
 
-// ═══════════════════════════════════════════════════
-//  TAKE TRANSCRIPT
-//  Records snapTime, waits WAIT_MS for late speech,
-//  then grabs all chunks in [snapTime-5s, snapTime+WAIT_MS].
-//  Resets chunks so old data never carries over.
-// ═══════════════════════════════════════════════════
-function takeTranscript() {
-  if (isTaking) return; // prevent double-tap during wait
-  isTaking = true;
+  // ─── takeTranscript ────────────────────────────
+  // Snap the time, wait 1.5 s for late arrivals, then save.
+  function takeTranscript() {
+    if (isTaking || !isRecording) return;
+    isTaking = true;
 
-  const btn      = document.getElementById('takeBtn');
-  btn.classList.add('capturing');
-  btn.innerHTML  = '⏳&nbsp;&nbsp;Capturing…';
-  btn.disabled   = true;
+    const btn      = document.getElementById('takeBtn');
+    btn.classList.add('capturing');
+    btn.innerHTML  = '⏳&nbsp;&nbsp;CAPTURING…';
+    btn.style.animation = 'none';
 
-  const snapTime = Date.now();
+    const snapTime = Date.now();
 
-  setTimeout(() => {
-    const cutoff     = snapTime - 5000;
-    const captureEnd = snapTime + WAIT_MS;
+    setTimeout(function() {
+      // Window: from (snapTime - 5000) to (snapTime + 1500)
+      const captureEnd = snapTime + 1500;
+      const text = getLast5s(captureEnd);
 
-    const text = chunks
-      .filter(c => c.endTime >= cutoff && c.startTime <= captureEnd)
-      .map(c => c.text)
-      .join(' ')
-      .trim();
+      // Save card
+      addCard(text);
 
-    addCard(text || '(no speech detected in the last 5 seconds)');
+      // Remove captured entries so next Take Transcript starts fresh
+      entries = entries.filter(function(e) { return e.time > captureEnd; });
+      interimText = '';
+      interimTime = 0;
 
-    // ── Remove captured chunks so they don't appear next time ──
-    chunks = chunks.filter(c => c.endTime > captureEnd);
+      btn.classList.remove('capturing');
+      btn.classList.add('done');
+      btn.innerHTML = '✅&nbsp;&nbsp;SAVED!';
 
-    btn.classList.remove('capturing');
-    btn.classList.add('done');
-    btn.innerHTML = '✅&nbsp;&nbsp;Saved!';
-    btn.disabled  = false;
+      setTimeout(function() {
+        btn.classList.remove('done');
+        btn.classList.remove('capturing');
+        btn.innerHTML = '📋&nbsp;&nbsp;TAKE TRANSCRIPT';
+        btn.style.animation = '';
+        isTaking = false;
+      }, 1000);
 
-    setTimeout(() => {
-      btn.classList.remove('done');
-      btn.innerHTML = '📋&nbsp;&nbsp;TAKE TRANSCRIPT';
-      isTaking = false;
-    }, 1000);
-  }, WAIT_MS);
-}
+    }, 1500);
+  }
 
-// ═══════════════════════════════════════════════════
-//  STOP
-// ═══════════════════════════════════════════════════
-function stopRec() {
-  isRecording = false;
+  // ─── addCard ───────────────────────────────────
+  function addCard(text) {
+    const section = document.getElementById('txSection');
+    const empty   = document.getElementById('emptyMsg');
+    const header  = section.querySelector('.tx-header');
 
-  clearTimeout(sessionTimer);
-  clearInterval(elapsedTimer);
-  clearInterval(liveTimer);
+    if (empty) empty.style.display = 'none';
+    document.getElementById('clearBtn').style.display = 'inline-block';
 
-  try { recognition?.stop(); } catch(e) {}
-  try { mediaStream?.getTracks().forEach(t => t.stop()); } catch(e) {}
-  try { silentCtx?.close(); } catch(e) {}
+    const now  = new Date();
+    const time = now.toLocaleTimeString('ja-JP', { hour12: false });
 
-  document.getElementById('uiRec').style.display      = 'none';
-  document.getElementById('uiIdle').style.display     = 'block';
-  document.getElementById('liveSection').style.display = 'none';
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML =
+      '<div class="card-head">' +
+        '<span class="card-time">' + time + '</span>' +
+        '<span class="card-badge">Last 5s</span>' +
+      '</div>' +
+      '<div class="card-body' + (text ? '' : ' no-speech') + '">' +
+        (text || '(No speech detected)') +
+      '</div>';
 
-  chunks         = [];
-  currentInterim = '';
-}
+    // Insert after header
+    if (header && header.nextSibling) {
+      section.insertBefore(card, header.nextSibling);
+    } else {
+      section.appendChild(card);
+    }
+  }
 
-// ─── Add transcript card ───────────────────────────
-function addCard(text) {
-  const noSpeech = !text || text.startsWith('(no speech');
-  const now      = new Date();
-  const ts       = now.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // ─── clearCards ────────────────────────────────
+  function clearCards() {
+    const section = document.getElementById('txSection');
+    section.querySelectorAll('.card').forEach(function(c) { c.remove(); });
+    document.getElementById('emptyMsg').style.display = 'block';
+    document.getElementById('clearBtn').style.display = 'none';
+  }
 
-  const list = document.getElementById('cardList');
-  const empty = list.querySelector('.empty-msg');
-  if (empty) empty.remove();
+  // ─── MediaSession (lock screen ⏭ = Take Transcript) ───
+  function setupMediaSession() {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title:  'SpeakUp 🎤',
+        artist: 'Recording in progress…',
+        album:  'Tap ⏭ Next = Take Transcript'
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', takeTranscript);
+      navigator.mediaSession.setActionHandler('play',  function() {});
+      navigator.mediaSession.setActionHandler('pause', function() {});
+    } catch(e) {}
+  }
 
-  const card = document.createElement('div');
-  card.className = 'card';
-  card.innerHTML = `
-    <div class="card-head">
-      <span class="card-time">${ts}</span>
-      <span class="card-badge">5s</span>
-    </div>
-    <div class="card-body ${noSpeech ? 'no-speech' : ''}">${text}</div>
-  `;
-  list.prepend(card);
+  // ─── Silent Audio (keeps iOS tab alive in background) ──
+  function startSilentAudio() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 3600, ctx.sampleRate);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop   = true;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch(e) {}
+  }
 
-  document.getElementById('clearBtn').style.display = 'block';
-}
-
-// ─── Clear all cards ───────────────────────────────
-function clearAll() {
-  document.getElementById('cardList').innerHTML =
-    '<p class="empty-msg">Press ▶ Start Recording<br>then 📋 Take Transcript<br>to save what you said</p>';
-  document.getElementById('clearBtn').style.display = 'none';
-}
-</script>
+  // ─── Alert helpers ─────────────────────────────
+  function showAlert(msg) {
+    const box = document.getElementById('alertBox');
+    box.textContent = msg;
+    box.style.display = 'block';
+  }
+  function hideAlert() {
+    document.getElementById('alertBox').style.display = 'none';
+  }
+  </script>
 </body>
 </html>
