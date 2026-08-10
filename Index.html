@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>SpeakUp</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0d1a;
+      min-height: 100vh;
+      color: white;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Sticky Top Bar ── */
+    .top-bar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #0d0d1a;
+      padding: env(safe-area-inset-top, 14px) 16px 14px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .app-title {
+      text-align: center;
+      font-size: 11px;
+      color: rgba(255,255,255,0.28);
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    /* ── Start Button ── */
+    .start-btn {
+      width: 100%;
+      height: 80px;
+      border-radius: 22px;
+      border: none;
+      background: linear-gradient(135deg, #22c55e, #16a34a);
+      color: white;
+      font-size: 19px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      box-shadow: 0 6px 24px rgba(34,197,94,0.4);
+      touch-action: manipulation;
+      transition: transform 0.15s;
+    }
+    .start-btn:active { transform: scale(0.97); }
+
+    /* ── Recording UI ── */
+    #uiRec { display: none; flex-direction: column; gap: 10px; }
+
+    .rec-status {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .rec-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #e94560;
+      animation: blink 1s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.1} }
+    .rec-time {
+      font-size: 14px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.55);
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 1px;
+    }
+    .bg-badge {
+      font-size: 10px;
+      background: rgba(34,197,94,0.15);
+      color: #22c55e;
+      padding: 2px 8px;
+      border-radius: 8px;
+      margin-left: 4px;
+    }
+
+    /* ── Take Transcript Button (PRIMARY – big) ── */
+    .take-btn {
+      width: 100%;
+      height: 86px;
+      border-radius: 22px;
+      border: none;
+      background: linear-gradient(135deg, #3b82f6, #6366f1);
+      color: white;
+      font-size: 20px;
+      font-weight: 800;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      box-shadow: 0 6px 28px rgba(99,102,241,0.5);
+      touch-action: manipulation;
+      transition: transform 0.12s, background 0.2s;
+      animation: pulseBlue 2s ease-in-out infinite alternate;
+      letter-spacing: 0.5px;
+    }
+    @keyframes pulseBlue {
+      from { box-shadow: 0 6px 20px rgba(99,102,241,0.4); }
+      to   { box-shadow: 0 6px 38px rgba(99,102,241,0.75); }
+    }
+    .take-btn:active { transform: scale(0.96); }
+    .take-btn.flash {
+      background: linear-gradient(135deg, #22c55e, #16a34a) !important;
+      animation: none;
+    }
+
+    /* ── Stop Button (SECONDARY – small) ── */
+    .stop-btn {
+      width: 100%;
+      height: 50px;
+      border-radius: 14px;
+      border: 1.5px solid rgba(233,69,96,0.45);
+      background: rgba(233,69,96,0.1);
+      color: rgba(233,69,96,0.85);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      touch-action: manipulation;
+      transition: transform 0.12s, background 0.15s;
+    }
+    .stop-btn:active { transform: scale(0.96); background: rgba(233,69,96,0.22); }
+
+    /* ── Lock Screen Tip ── */
+    .lock-tip {
+      margin-top: 2px;
+      background: rgba(99,102,241,0.08);
+      border: 1px solid rgba(99,102,241,0.2);
+      border-radius: 12px;
+      padding: 9px 14px;
+      font-size: 12px;
+      color: rgba(255,255,255,0.5);
+      line-height: 1.7;
+      text-align: center;
+    }
+    .lock-tip strong { color: #818cf8; }
+
+    /* ── Live 5s Window ── */
+    .live-section {
+      padding: 12px 16px 0;
+      display: none;
+    }
+    .live-label {
+      font-size: 10px;
+      color: rgba(255,255,255,0.3);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .live-box {
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 14px;
+      font-size: 14px;
+      color: rgba(255,255,255,0.35);
+      font-style: italic;
+      min-height: 52px;
+      word-break: break-word;
+      line-height: 1.65;
+      border: 1px solid rgba(255,255,255,0.06);
+      transition: color 0.2s;
+    }
+    .live-box.has-text {
+      color: rgba(255,255,255,0.88);
+      font-style: normal;
+    }
+
+    /* ── Alert ── */
+    .alert {
+      margin: 10px 16px 0;
+      background: rgba(233,69,96,0.1);
+      border: 1px solid rgba(233,69,96,0.3);
+      border-radius: 12px;
+      padding: 11px 14px;
+      font-size: 13px;
+      color: rgba(255,255,255,0.82);
+      line-height: 1.7;
+      display: none;
+    }
+
+    /* ── Transcripts ── */
+    .transcripts-section {
+      flex: 1;
+      padding: 14px 16px 80px;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .tx-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .tx-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.3);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .clear-btn {
+      display: none;
+      background: none;
+      border: 1px solid rgba(233,69,96,0.4);
+      color: rgba(233,69,96,0.75);
+      font-size: 12px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    .empty-msg {
+      text-align: center;
+      font-size: 14px;
+      color: rgba(255,255,255,0.18);
+      margin-top: 32px;
+      line-height: 2.5;
+    }
+
+    /* ── Card ── */
+    .card {
+      background: rgba(255,255,255,0.06);
+      border-radius: 14px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      animation: slideUp 0.3s ease;
+    }
+    @keyframes slideUp {
+      from { opacity:0; transform:translateY(6px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    .card-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .card-time { font-size: 12px; color: rgba(255,255,255,0.3); flex: 1; }
+    .card-badge {
+      font-size: 11px;
+      background: rgba(99,102,241,0.2);
+      color: #818cf8;
+      padding: 2px 9px;
+      border-radius: 9px;
+    }
+    .card-body {
+      font-size: 15px;
+      line-height: 1.65;
+      color: white;
+      word-break: break-word;
+    }
+    .card-body.no-speech {
+      color: rgba(255,255,255,0.27);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── Sticky Top Bar ── -->
+  <div class="top-bar">
+    <p class="app-title">🎙️ SpeakUp</p>
+
+    <!-- IDLE -->
+    <div id="uiIdle">
+      <button class="start-btn" onclick="startRecording()">
+        <span>▶</span><span>Start Recording</span>
+      </button>
+    </div>
+
+    <!-- RECORDING -->
+    <div id="uiRec">
+      <div class="rec-status">
+        <div class="rec-dot"></div>
+        <span class="rec-time" id="recTime">00:00:00</span>
+        <span class="bg-badge">● BG Active</span>
+      </div>
+
+      <!-- PRIMARY: Take Transcript -->
+      <button class="take-btn" id="takeBtn" onclick="takeTranscript()">
+        📋&nbsp;&nbsp;TAKE TRANSCRIPT
+      </button>
+
+      <!-- Lock screen tip -->
+      <div class="lock-tip">
+        📱 Screen locked? &nbsp;<strong>Control Center → ⏭ Next</strong>&nbsp; to take transcript
+        &nbsp;|&nbsp; 🎧 Earphone: <strong>double-press</strong>
+      </div>
+
+      <!-- SECONDARY: Stop -->
+      <button class="stop-btn" onclick="stopRecording()">
+        ⏹&nbsp; STOP
+      </button>
+    </div>
+  </div>
+
+  <!-- ── Alert ── -->
+  <div class="alert" id="alertBox"></div>
+
+  <!-- ── Live 5s Window ── -->
+  <div class="live-section" id="liveSection">
+    <div class="live-label">⏱ Live · last 5 seconds</div>
+    <div class="live-box" id="liveBox">🎤 Listening…</div>
+  </div>
+
+  <!-- ── Transcripts ── -->
+  <div class="transcripts-section" id="txSection">
+    <div class="tx-header">
+      <span class="tx-title">📝 Transcripts</span>
+      <button class="clear-btn" id="clearBtn" onclick="clearCards()">Clear all</button>
+    </div>
+    <div id="cardList">
+      <p class="empty-msg" id="emptyMsg">
+        Press ▶ Start to begin recording<br>
+        📋 Tap TAKE TRANSCRIPT anytime<br>
+        to capture the last 5 seconds
+      </p>
+    </div>
+  </div>
+
+<script>
+// ══════════════════════════════════════════════
+//  STATE
+// ══════════════════════════════════════════════
+let isRecording   = false;
+let recognition   = null;
+let elapsedSec    = 0;
+let elapsedTimer  = null;
+let liveTimer     = null;
+let audioCtx      = null;
+let silentNode    = null;
+
+// KEY FIX: each completed phrase stored with exact endTime (ms)
+let phraseLog  = [];   // [{ text: string, endTime: number }]
+let interimTxt = '';   // current in-progress (not yet final) text
+
+// ══════════════════════════════════════════════
+//  SILENT AUDIO — keeps iOS from killing the tab
+// ══════════════════════════════════════════════
+function startSilentAudio() {
+  try {
+    audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+    const buf  = audioCtx.createBuffer(1, audioCtx.sampleRate * 3, audioCtx.sampleRate);
+    silentNode = audioCtx.createBufferSource();
+    silentNode.buffer = buf;
+    silentNode.loop   = true;
+    silentNode.connect(audioCtx.destination);
+    silentNode.start(0);
+  } catch(e) { console.warn('Silent audio failed:', e); }
+}
+
+function stopSilentAudio() {
+  try { silentNode && silentNode.stop(); audioCtx && audioCtx.close(); } catch(e) {}
+  silentNode = null; audioCtx = null;
+}
+
+// ══════════════════════════════════════════════
+//  MEDIA SESSION — lock screen / earphone button
+// ══════════════════════════════════════════════
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title:  'SpeakUp 🎤',
+    artist: 'Tap ⏭ to take transcript',
+    album:  'Recording in progress…'
+  });
+  // ⏭ Next Track → Take Transcript
+  try {
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      if (isRecording) takeTranscript();
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', () => {});
+  } catch(e) {}
+}
+
+// ══════════════════════════════════════════════
+//  SPEECH RECOGNITION
+// ══════════════════════════════════════════════
+function buildRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    showAlert('音声認識に対応していません。iPhoneのSafariで開いてください。');
+    return null;
+  }
+
+  const r = new SR();
+  r.lang            = 'en-US';
+  r.continuous      = false;   // iOS requires false
+  r.interimResults  = true;
+  r.maxAlternatives = 1;
+
+  // ── onresult: store FINAL phrases with timestamp ──
+  r.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        const trimmed = t.trim();
+        if (trimmed) {
+          // Stamp the exact moment this phrase was recognized
+          phraseLog.push({ text: trimmed, endTime: Date.now() });
+        }
+      } else {
+        interim += t;
+      }
+    }
+    interimTxt = interim;
+  };
+
+  // ── onend: auto-restart while recording ──
+  r.onend = () => {
+    interimTxt = '';
+    if (isRecording) {
+      setTimeout(() => {
+        if (isRecording && recognition) {
+          try { recognition.start(); } catch(e) {}
+        }
+      }, 150);
+    }
+  };
+
+  r.onerror = (e) => {
+    // 'no-speech' is normal silence — ignore
+    if (e.error === 'no-speech' || e.error === 'network' || e.error === 'aborted') return;
+    if (e.error === 'not-allowed') {
+      showAlert('マイクへのアクセスが拒否されました。\nSafari設定 → このWebサイト → マイク → 許可');
+      stopRecording();
+    }
+  };
+
+  return r;
+}
+
+// ══════════════════════════════════════════════
+//  START RECORDING
+// ══════════════════════════════════════════════
+async function startRecording() {
+  // 1. Explicitly unlock mic (required before SR on iOS)
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => t.stop()); // release — SR manages its own stream
+  } catch(e) {
+    showAlert('マイクのアクセスが拒否されました。\nSafari設定 → このWebサイト → マイク → 許可');
+    return;
+  }
+
+  // 2. Reset state
+  phraseLog  = [];
+  interimTxt = '';
+  elapsedSec = 0;
+  isRecording = true;
+
+  // 3. UI
+  document.getElementById('uiIdle').style.display    = 'none';
+  document.getElementById('uiRec').style.display     = 'flex';
+  document.getElementById('liveSection').style.display = 'block';
+  document.getElementById('liveBox').textContent     = '🎤 Listening…';
+  document.getElementById('liveBox').classList.remove('has-text');
+
+  // 4. Elapsed timer
+  elapsedTimer = setInterval(() => {
+    elapsedSec++;
+    const h = String(Math.floor(elapsedSec / 3600)).padStart(2,'0');
+    const m = String(Math.floor((elapsedSec % 3600) / 60)).padStart(2,'0');
+    const s = String(elapsedSec % 60).padStart(2,'0');
+    document.getElementById('recTime').textContent = `${h}:${m}:${s}`;
+  }, 1000);
+
+  // 5. Live-box refresh (every 300ms, shows last 5s)
+  liveTimer = setInterval(refreshLiveBox, 300);
+
+  // 6. Background keep-alive
+  startSilentAudio();
+  setupMediaSession();
+
+  // 7. Start recognition
+  recognition = buildRecognition();
+  if (recognition) {
+    try { recognition.start(); } catch(e) { console.warn(e); }
+  }
+}
+
+// ══════════════════════════════════════════════
+//  STOP RECORDING
+// ══════════════════════════════════════════════
+function stopRecording() {
+  isRecording = false;
+  clearInterval(elapsedTimer);
+  clearInterval(liveTimer);
+  stopSilentAudio();
+
+  try { recognition && recognition.abort(); } catch(e) {}
+  recognition = null;
+  interimTxt  = '';
+
+  document.getElementById('uiIdle').style.display     = 'block';
+  document.getElementById('uiRec').style.display      = 'none';
+  document.getElementById('liveSection').style.display = 'none';
+  document.getElementById('liveBox').textContent      = '';
+  document.getElementById('liveBox').classList.remove('has-text');
+}
+
+// ══════════════════════════════════════════════
+//  TAKE TRANSCRIPT  (last 5 seconds only)
+// ══════════════════════════════════════════════
+function takeTranscript() {
+  const now    = Date.now();
+  const cutoff = now - 5000;
+
+  // Filter phrases completed within the last 5 seconds
+  const text = phraseLog
+    .filter(p => p.endTime >= cutoff)
+    .map(p => p.text)
+    .join(' ')
+    .trim();
+
+  addCard(text || null);
+
+  // Flash button green to confirm
+  const btn = document.getElementById('takeBtn');
+  btn.classList.add('flash');
+  setTimeout(() => btn.classList.remove('flash'), 400);
+}
+
+// ══════════════════════════════════════════════
+//  LIVE BOX REFRESH
+// ══════════════════════════════════════════════
+function refreshLiveBox() {
+  const now    = Date.now();
+  const cutoff = now - 5000;
+
+  // Prune phrases older than 10s from memory
+  phraseLog = phraseLog.filter(p => p.endTime >= now - 10000);
+
+  // Collect last 5s completed phrases + current interim
+  const completed = phraseLog
+    .filter(p => p.endTime >= cutoff)
+    .map(p => p.text)
+    .join(' ');
+
+  const display = [completed, interimTxt].filter(Boolean).join(' ').trim();
+
+  const box = document.getElementById('liveBox');
+  if (display) {
+    box.textContent = display;
+    box.classList.add('has-text');
+  } else {
+    box.textContent = '🎤 Listening…';
+    box.classList.remove('has-text');
+  }
+}
+
+// ══════════════════════════════════════════════
+//  ADD CARD
+// ══════════════════════════════════════════════
+function addCard(text) {
+  document.getElementById('emptyMsg').style.display = 'none';
+  document.getElementById('clearBtn').style.display  = 'block';
+
+  const time = new Date().toTimeString().slice(0, 8);
+
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.innerHTML = `
+    <div class="card-head">
+      <span class="card-time">${time}</span>
+      <span class="card-badge">last 5s</span>
+    </div>
+    <div class="card-body ${!text ? 'no-speech' : ''}">
+      ${text ? escHtml(text) : '(no speech detected in the last 5 seconds)'}
+    </div>`;
+
+  const list = document.getElementById('cardList');
+  list.insertBefore(card, list.firstChild);
+}
+
+// ══════════════════════════════════════════════
+//  HELPERS
+// ══════════════════════════════════════════════
+function clearCards() {
+  const list = document.getElementById('cardList');
+  list.querySelectorAll('.card').forEach(c => c.remove());
+  document.getElementById('emptyMsg').style.display = 'block';
+  document.getElementById('clearBtn').style.display  = 'none';
+}
+
+function showAlert(msg) {
+  const el = document.getElementById('alertBox');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 7000);
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+</body>
+</html>
