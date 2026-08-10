@@ -301,15 +301,15 @@
         📋&nbsp;&nbsp;TAKE TRANSCRIPT
       </button>
 
+      <!-- SECONDARY: Stop -->
+      <button class="stop-btn" onclick="stopRecording()">
+        ⏹&nbsp;&nbsp;STOP
+      </button>
+
       <div class="lock-tip">
         📱 Lock screen: tap <strong>⏭ next</strong> in media controls<br>
         🎧 Earphones: press center button <strong>twice</strong>
       </div>
-
-      <!-- SECONDARY: Stop -->
-      <button class="stop-btn" onclick="stopRecording()">
-        ⏹&nbsp; STOP
-      </button>
     </div>
   </div>
 
@@ -318,128 +318,44 @@
 
   <!-- LIVE BOX -->
   <div class="live-section" id="liveSection">
-    <p class="live-label">🟢 Live · last 5 seconds</p>
+    <p class="live-label">● Live · last 5 seconds</p>
     <div class="live-box" id="liveBox">🎤 Listening…</div>
   </div>
 
   <!-- TRANSCRIPTS -->
   <div class="transcripts-section">
     <div class="tx-header">
-      <span class="tx-title">📝 Transcripts</span>
+      <span class="tx-title">Transcripts</span>
       <button class="clear-btn" id="clearBtn" onclick="clearAll()">Clear All</button>
     </div>
     <div id="cardList">
-      <p class="empty-msg" id="emptyMsg">
-        Press <strong>Start Recording</strong> to begin<br>
-        Then tap <strong>TAKE TRANSCRIPT</strong> anytime<br>
-        to capture the last 5 seconds
-      </p>
+      <div class="empty-msg" id="emptyMsg">
+        Press ▶ to start recording<br>
+        then tap <strong style="color:#818cf8">📋 Take Transcript</strong><br>
+        to save what you said
+      </div>
     </div>
   </div>
 
 <script>
-// ── STATE ──────────────────────────────────────────────────────────────────
-let isRecording   = false;
-let recognition   = null;
-let timerInterval = null;
-let liveInterval  = null;
-let startTime     = null;
-let audioCtx      = null;
-let silentSource  = null;
+// ═══════════════════════════════════════════════════════
+// THE SINGLE SOURCE OF TRUTH
+// wordLog is the ONLY place speech data is stored.
+// Both liveBox and takeTranscript read from getLast5s().
+// If liveBox shows text → takeTranscript will too. Always.
+// ═══════════════════════════════════════════════════════
 
-// THE ONE SOURCE OF TRUTH: every final phrase with the ms it finished
-// [{text: string, endTime: number}]
-let wordLog = [];
+let wordLog = [];        // [{text: string, endTime: number}]
+let isRecording = false;
+let recog = null;
+let silentCtx = null;
+let silentSrc = null;
+let timerRef = null;
+let liveRef = null;
+let startEpoch = 0;
 
-// ── SILENT AUDIO (keeps Safari alive in background) ──────────────────────
-function startSilentAudio() {
-  try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate);
-    const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
-    src.connect(audioCtx.destination);
-    src.start();
-    silentSource = src;
-  } catch(e) { console.warn('AudioContext failed:', e); }
-}
-
-function stopSilentAudio() {
-  try { silentSource && silentSource.stop(); } catch(e) {}
-  try { audioCtx && audioCtx.close(); } catch(e) {}
-  silentSource = null; audioCtx = null;
-}
-
-// ── MEDIA SESSION (lock screen ⏭ button = Take Transcript) ──────────────
-function setupMediaSession() {
-  if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title:  'SpeakUp 🎤 Recording',
-    artist: '⏭ Next = Take Transcript',
-    album:  'SpeakUp English App',
-  });
-  navigator.mediaSession.playbackState = 'playing';
-  navigator.mediaSession.setActionHandler('nexttrack',     () => takeTranscript());
-  navigator.mediaSession.setActionHandler('previoustrack', () => {});
-  navigator.mediaSession.setActionHandler('play',          () => {});
-  navigator.mediaSession.setActionHandler('pause',         () => {});
-}
-
-// ── BUILD A FRESH RECOGNITION INSTANCE ───────────────────────────────────
-function buildRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return null;
-
-  const r = new SR();
-  r.lang            = 'en-US';
-  r.continuous      = false;   // iOS Safari only supports false
-  r.interimResults  = false;   // only final results → clean timestamps
-
-  // ★ ONLY place we push to wordLog
-  r.onresult = (e) => {
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        const text = e.results[i][0].transcript.trim();
-        if (text) {
-          wordLog.push({ text, endTime: Date.now() });
-        }
-      }
-    }
-  };
-
-  r.onerror = (e) => {
-    if (!isRecording) return;
-    if (e.error === 'no-speech' || e.error === 'aborted') {
-      restartRecognition(); // silent restart
-    } else {
-      showAlert('⚠️ Recognition error: ' + e.error + '. Restarting…');
-      setTimeout(restartRecognition, 300);
-    }
-  };
-
-  r.onend = () => {
-    if (isRecording) restartRecognition();
-  };
-
-  return r;
-}
-
-function restartRecognition() {
-  if (!isRecording) return;
-  setTimeout(() => {
-    if (!isRecording) return;
-    try {
-      recognition = buildRecognition();
-      recognition.start();
-    } catch(e) {
-      setTimeout(restartRecognition, 300);
-    }
-  }, 120);
-}
-
-// ── GET LAST 5 SECONDS ────────────────────────────────────────────────────
-// Single function used by BOTH the live box AND Take Transcript
+// ─── GET LAST 5 SECONDS ─────────────────────────────
+// This is the ONE function used by BOTH liveBox and takeTranscript.
 function getLast5s() {
   const cutoff = Date.now() - 5000;
   return wordLog
@@ -449,134 +365,238 @@ function getLast5s() {
     .trim();
 }
 
-// ── LIVE BOX (refreshes every 300 ms) ────────────────────────────────────
-function refreshLiveBox() {
-  const box  = document.getElementById('liveBox');
+// ─── START ──────────────────────────────────────────
+function startRecording() {
+  if (isRecording) return;
+
+  // Unlock microphone first via getUserMedia
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .then(() => {
+      isRecording = true;
+      wordLog = [];
+      startEpoch = Date.now();
+
+      startSilentAudio();
+      setupMediaSession();
+      startRecognitionLoop();
+
+      // Timer
+      timerRef = setInterval(() => {
+        const s = Math.floor((Date.now() - startEpoch) / 1000);
+        const h = String(Math.floor(s / 3600)).padStart(2,'0');
+        const m = String(Math.floor((s % 3600) / 60)).padStart(2,'0');
+        const sc = String(s % 60).padStart(2,'0');
+        document.getElementById('recTime').textContent = h+':'+m+':'+sc;
+      }, 1000);
+
+      // Live box: reads from getLast5s() every 300ms
+      liveRef = setInterval(() => {
+        const text = getLast5s();
+        const box = document.getElementById('liveBox');
+        if (text) {
+          box.textContent = text;
+          box.classList.add('has-text');
+        } else {
+          box.textContent = '🎤 Listening…';
+          box.classList.remove('has-text');
+        }
+      }, 300);
+
+      document.getElementById('uiIdle').style.display = 'none';
+      document.getElementById('uiRec').style.display = 'flex';
+      document.getElementById('liveSection').style.display = 'block';
+      showAlert('');
+    })
+    .catch(() => {
+      showAlert('⚠️ Microphone access denied. Go to Safari Settings → SpeakUp → Allow Microphone.');
+    });
+}
+
+// ─── TAKE TRANSCRIPT ────────────────────────────────
+// Reads from getLast5s() — exact same function as liveBox.
+// If liveBox shows text, this will ALWAYS find it.
+function takeTranscript() {
   const text = getLast5s();
-  if (text) {
-    box.textContent = text;
-    box.classList.add('has-text');
-  } else {
-    box.textContent = '🎤 Listening…';
-    box.classList.remove('has-text');
-  }
+
+  // Add card
+  addCard(text);
+
+  // Flash button green for feedback
+  const btn = document.getElementById('takeBtn');
+  btn.classList.add('flash');
+  setTimeout(() => btn.classList.remove('flash'), 700);
 }
 
-// ── TIMER ─────────────────────────────────────────────────────────────────
-function updateTimer() {
-  const s   = Math.floor((Date.now() - startTime) / 1000);
-  const hh  = String(Math.floor(s / 3600)).padStart(2, '0');
-  const mm  = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const ss  = String(s % 60).padStart(2, '0');
-  document.getElementById('recTime').textContent = `${hh}:${mm}:${ss}`;
-}
+// ─── STOP ────────────────────────────────────────────
+function stopRecording() {
+  isRecording = false;
+  clearInterval(timerRef);
+  clearInterval(liveRef);
 
-// ── START ─────────────────────────────────────────────────────────────────
-async function startRecording() {
-  // 1. Request mic first (unlocks audio on iOS)
-  try {
-    await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch(e) {
-    showAlert('🚫 Microphone permission denied. Go to Settings → Safari → Microphone → Allow.');
-    return;
+  if (recog) {
+    try { recog.stop(); } catch(e) {}
+    recog = null;
   }
 
-  // 2. Check SR support
-  if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+  stopSilentAudio();
+
+  document.getElementById('uiIdle').style.display = 'block';
+  document.getElementById('uiRec').style.display = 'none';
+  document.getElementById('liveSection').style.display = 'none';
+
+  const box = document.getElementById('liveBox');
+  box.textContent = '🎤 Listening…';
+  box.classList.remove('has-text');
+}
+
+// ─── SPEECH RECOGNITION LOOP ────────────────────────
+// iOS Safari doesn't support continuous=true.
+// So we use continuous=false and restart on onend.
+function startRecognitionLoop() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
     showAlert('⚠️ Speech recognition not supported. Please use Safari on iPhone.');
     return;
   }
 
-  wordLog    = [];
-  isRecording = true;
-  startTime  = Date.now();
+  function createAndStart() {
+    if (!isRecording) return;
 
-  startSilentAudio();
-  setupMediaSession();
+    const r = new SR();
+    r.lang = 'en-US';
+    r.continuous = false;       // iOS requires false
+    r.interimResults = false;   // final results only → precise endTime
 
-  recognition = buildRecognition();
-  try { recognition.start(); } catch(e) {}
+    r.onresult = function(e) {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          const text = e.results[i][0].transcript.trim();
+          if (text) {
+            // ★ Store with exact timestamp when this phrase ended
+            wordLog.push({ text: text, endTime: Date.now() });
+          }
+        }
+      }
+    };
 
-  timerInterval = setInterval(updateTimer, 1000);
-  liveInterval  = setInterval(refreshLiveBox, 300);
+    r.onerror = function(e) {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        showAlert('⚠️ Microphone blocked. Allow microphone in Safari Settings.');
+        stopRecording();
+      }
+      // Other errors (network, no-speech): just restart
+    };
 
-  document.getElementById('uiIdle').style.display    = 'none';
-  document.getElementById('uiRec').style.display     = 'flex';
-  document.getElementById('liveSection').style.display = 'block';
-  hideAlert();
-}
+    r.onend = function() {
+      // Restart immediately if still recording
+      if (isRecording) {
+        setTimeout(createAndStart, 150);
+      }
+    };
 
-// ── TAKE TRANSCRIPT ───────────────────────────────────────────────────────
-function takeTranscript() {
-  // Capture the SAME data the live box is showing
-  const text = getLast5s();
-  const time = new Date().toTimeString().slice(0, 8);
-
-  addCard(text, time);
-
-  const btn = document.getElementById('takeBtn');
-  btn.classList.add('flash');
-  setTimeout(() => btn.classList.remove('flash'), 600);
-}
-
-// ── STOP ──────────────────────────────────────────────────────────────────
-function stopRecording() {
-  isRecording = false;
-
-  try { recognition && recognition.abort(); } catch(e) {}
-  recognition = null;
-
-  clearInterval(timerInterval);
-  clearInterval(liveInterval);
-  timerInterval = null;
-  liveInterval  = null;
-
-  stopSilentAudio();
-
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.playbackState = 'none';
+    try {
+      r.start();
+      recog = r;
+    } catch(e) {
+      if (isRecording) setTimeout(createAndStart, 300);
+    }
   }
 
-  document.getElementById('uiIdle').style.display      = 'block';
-  document.getElementById('uiRec').style.display       = 'none';
-  document.getElementById('liveSection').style.display = 'none';
+  createAndStart();
 }
 
-// ── ADD CARD ──────────────────────────────────────────────────────────────
-function addCard(text, time) {
-  const emptyMsg = document.getElementById('emptyMsg');
-  if (emptyMsg) emptyMsg.remove();
+// ─── SILENT AUDIO (keeps Safari alive in background) ─
+function startSilentAudio() {
+  try {
+    silentCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const buf = silentCtx.createBuffer(1, silentCtx.sampleRate * 3, silentCtx.sampleRate);
+    const src = silentCtx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.connect(silentCtx.destination);
+    src.start();
+    silentSrc = src;
+  } catch(e) {}
+}
 
+function stopSilentAudio() {
+  try {
+    if (silentSrc) silentSrc.stop();
+    if (silentCtx) silentCtx.close();
+  } catch(e) {}
+  silentSrc = null;
+  silentCtx = null;
+}
+
+// ─── MEDIA SESSION (lock screen ⏭ button) ───────────
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'SpeakUp 🎤',
+      artist: 'Recording in progress…',
+      album: 'Tap ⏭ to Take Transcript'
+    });
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      takeTranscript();
+    });
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+      takeTranscript();
+    });
+  } catch(e) {}
+}
+
+// ─── ADD CARD ─────────────────────────────────────────
+function addCard(text) {
+  document.getElementById('emptyMsg').style.display = 'none';
   document.getElementById('clearBtn').style.display = 'block';
+
+  const now = new Date();
+  const time = now.toTimeString().slice(0,8);
 
   const card = document.createElement('div');
   card.className = 'card';
+
+  const noSpeech = !text;
+
   card.innerHTML = `
     <div class="card-head">
       <span class="card-time">${time}</span>
       <span class="card-badge">last 5s</span>
     </div>
-    <div class="card-body ${!text ? 'no-speech' : ''}">
-      ${text || '(No speech detected in last 5 seconds)'}
-    </div>`;
-  document.getElementById('cardList').prepend(card);
+    <div class="card-body ${noSpeech ? 'no-speech' : ''}">
+      ${noSpeech ? '(no speech in the last 5 seconds)' : escHtml(text)}
+    </div>
+  `;
+
+  const list = document.getElementById('cardList');
+  list.insertBefore(card, list.firstChild);
 }
 
-// ── CLEAR ─────────────────────────────────────────────────────────────────
+// ─── CLEAR ALL ────────────────────────────────────────
 function clearAll() {
-  const list = document.getElementById('cardList');
-  list.innerHTML = '';
+  document.getElementById('cardList').innerHTML =
+    '<div class="empty-msg" id="emptyMsg">' +
+    'Press ▶ to start recording<br>' +
+    'then tap <strong style="color:#818cf8">📋 Take Transcript</strong><br>' +
+    'to save what you said</div>';
   document.getElementById('clearBtn').style.display = 'none';
 }
 
-// ── ALERT ─────────────────────────────────────────────────────────────────
+// ─── ALERT ────────────────────────────────────────────
 function showAlert(msg) {
   const el = document.getElementById('alertBox');
-  el.textContent = msg;
-  el.style.display = 'block';
+  if (msg) {
+    el.textContent = msg;
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
 }
-function hideAlert() {
-  document.getElementById('alertBox').style.display = 'none';
+
+// ─── UTILS ────────────────────────────────────────────
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 </script>
 </body>
